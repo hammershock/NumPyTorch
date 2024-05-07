@@ -69,6 +69,10 @@ def randint(low, high=None, size=None):
     return np.random.randint(low, high, size)
 
 
+def argmax(x, dim=1):
+    return np.argmax(x, axis=dim)
+
+
 if __name__ == '__main__':
     state_dict = load_pytorch('./cvae_celeba.pth')
     save(state_dict, './cvae_celeba.pkl')

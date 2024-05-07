@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from collections.abc import Iterable
 from typing import Mapping
 
 import numpy as np
@@ -33,10 +34,14 @@ class Module:
         result = {}
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
-            if isinstance(attr, Module):
-                for key, value in attr.state_dict().items():
+            if isinstance(attr, Module):  # is submodule
+                for key, value in attr.state_dict().items():  # recursive fetch data from submodule's state_dict
                     result[f'{attr_name}.{key}'] = value
-            elif isinstance(attr, Parameter):
+            elif isinstance(attr, ModuleList):
+                for i, submodule in enumerate(attr):
+                    for key, value in submodule.state_dict().items():
+                        result[f'{attr_name}.{i}.{key}'] = value
+            elif isinstance(attr, Parameter):  # if self is base module, add parameters to state_dict
                 result[attr_name + '.value'] = attr.value
                 result[attr_name + '.grad'] = attr.grad
         return result
@@ -49,7 +54,11 @@ class Module:
                 setattr(param, res[1], value)
             elif len(res) > 2:
                 submodule = getattr(self, res[0])
-                submodule.load_state_dict({'.'.join(res[1:]): value})
+                if isinstance(submodule, Module):
+                    submodule.load_state_dict({'.'.join(res[1:]): value})
+                elif isinstance(submodule, ModuleList):
+                    ind = int(res[1])
+                    submodule[ind].load_state_dict({'.'.join(res[2:]): value})
 
     def to(self, device=None):
         return self
@@ -219,6 +228,62 @@ class Sequential(Module):
             parts = name.split('.')
             submodule = self.layers[int(parts[0])]
             submodule.load_state_dict({".".join(parts[1:]): value})
+
+
+
+class ModuleList:
+    def __init__(self, modules=None):
+        """
+        Initialize a ModuleList. Modules can be added later or passed in as an iterable.
+        :param modules: An iterable of modules to initialize the list, optional.
+        """
+        self.modules = []
+        if modules is not None:
+            if isinstance(modules, Iterable):
+                for module in modules:
+                    assert isinstance(module, Module)
+                    self.append(module)
+            else:
+                raise TypeError("Modules should be an iterable of 'Module' instances")
+
+    def append(self, module):
+        """
+        Append a module to the list.
+        :param module: The module to add.
+        """
+        if not isinstance(module, Module):
+            raise TypeError("append() argument must be an instance of Module")
+        self.modules.append(module)
+
+    def __getitem__(self, idx):
+        """
+        Get a module by index.
+        :param idx: Index of the module to retrieve.
+        :return: Module instance at the specified index.
+        """
+        return self.modules[idx]
+
+    def __setitem__(self, idx, module):
+        """
+        Set a module at a specific index.
+        :param idx: Index where the module is to be set.
+        :param module: The module to set.
+        """
+        if not isinstance(module, Module):
+            raise TypeError("Assigned value must be an instance of Module")
+        self.modules[idx] = module
+
+    def __len__(self):
+        """
+        Return the number of modules in the list.
+        """
+        return len(self.modules)
+
+    def __iter__(self):
+        """
+        Allow iteration over the modules in the list.
+        """
+        return iter(self.modules)
 
 
 class SoftmaxRegression(Sequential):

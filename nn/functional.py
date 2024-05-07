@@ -42,3 +42,21 @@ def cross_entropy_loss(preds: np.ndarray, targets: np.ndarray, epsilon=1e-12):
     grad = -targets / (preds + epsilon)
 
     return ce_loss, grad[:, :, None]
+
+
+def softmax(x, dim=1):
+    """
+    Apply the softmax function along the specified dimension of an input array.
+
+    Args:
+        x (np.ndarray): Input array.
+        dim (int): Dimension along which softmax will be computed.
+
+    Returns:
+        np.ndarray: Softmax output array, same shape as input.
+    """
+    # Shift input for numerical stability
+    e_x = np.exp(x - np.max(x, axis=dim, keepdims=True))
+    return e_x / np.sum(e_x, axis=dim, keepdims=True)
+
+
