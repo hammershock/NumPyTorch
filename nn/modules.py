@@ -51,6 +51,9 @@ class Module:
                 submodule = getattr(self, res[0])
                 submodule.load_state_dict({'.'.join(res[1:]): value})
 
+    def to(self, device=None):
+        return self
+
 
 class Linear(Module):
     """
@@ -132,7 +135,7 @@ class SoftmaxLayer(Module):
 
 
 class ReLU(Module):
-    def __init__(self):
+    def __init__(self, inplace=None):
         self.prev_inp = None
 
     def forward(self, inp):
@@ -434,6 +437,7 @@ class ConvTranspose2d(Module):
     def backward(self, dout) -> np.ndarray:
         raise NotImplementedError
 
+
 class BatchNormLayer(Module):
     def __init__(self, n_features, eps=1e-5, momentum=0.9):
         self.eps = eps
@@ -503,6 +507,90 @@ class BatchNormLayer(Module):
         return dx[..., np.newaxis]
 
 
+class BatchNorm2d(Module):
+    """
+    Examples
+    >>> bn = BatchNorm2d(3)
+    >>> input_tensor = np.random.randn(10, 3, 32, 32)  # Example input: 10 images, 3 channels, 32x32 pixels each
+    >>> output = bn(input_tensor, train=True)
+    >>> output.shape
+    (10, 3, 32, 32)
+    """
+    def __init__(self, num_features, eps=1e-5, momentum=0.9):
+        self.eps = eps
+        self.momentum = momentum
+        self.num_features = num_features
+
+        # Learnable parameters for scaling and shifting
+        self.gamma = Parameter(np.ones(num_features))
+        self.beta = Parameter(np.zeros(num_features))
+
+        # Variables to track running statistics during training
+        self.running_mean = np.zeros(num_features)
+        self.running_var = np.ones(num_features)
+
+    def forward(self, inp, train=True):
+        if train:
+            self.sample_mean = np.mean(inp, axis=(0, 2, 3), keepdims=True)
+            self.sample_var = np.var(inp, axis=(0, 2, 3), keepdims=True)
+
+            # Update running statistics
+            self.running_mean = self.momentum * self.running_mean + (1 - self.momentum) * self.sample_mean
+            self.running_var = self.momentum * self.running_var + (1 - self.momentum) * self.sample_var
+        else:
+            self.sample_mean = self.running_mean
+            self.sample_var = self.running_var
+
+        # Normalize
+        self.out_ = (inp - self.sample_mean) / np.sqrt(self.sample_var + self.eps)
+        # Reshape gamma and beta to be broadcastable across N, H, W dimensions
+        gamma_reshaped = self.gamma.value.reshape(1, self.num_features, 1, 1)
+        beta_reshaped = self.beta.value.reshape(1, self.num_features, 1, 1)
+        return gamma_reshaped * self.out_ + beta_reshaped
+
+    def backward(self, grad):
+        N, C, H, W = grad.shape
+        # Gradient w.r.t. the normalized input
+        grad_gamma = np.sum(grad * self.out_, axis=(0, 2, 3))
+        grad_beta = np.sum(grad, axis=(0, 2, 3))
+
+        # Gradient w.r.t. input
+        grad_out = grad * self.gamma.value.reshape(1, C, 1, 1) / np.sqrt(self.sample_var + self.eps)
+
+        # Sum gradients over all but the channel dimension
+        mean_grad_out = np.mean(grad_out, axis=(0, 2, 3), keepdims=True)
+        mean_grad_out_inp = np.mean(grad_out * self.out_, axis=(0, 2, 3), keepdims=True)
+
+        # Final gradient w.r.t. the input
+        dx = grad_out - mean_grad_out - self.out_ * mean_grad_out_inp
+        dx /= np.sqrt(self.sample_var + self.eps)
+
+        self.gamma.grad = grad_gamma
+        self.beta.grad = grad_beta
+
+        return dx
+
+    def load_state_dict(self, state_dict):
+        """
+        Load the model state from a state dictionary.
+
+        Args:
+            state_dict (dict): State dictionary containing weights and runtime statistics.
+        """
+        for key, value in state_dict.items():
+            if key == 'gamma.value':
+                self.gamma.value = value
+            elif key == 'beta.value':
+                self.beta.value = value
+            elif key == 'running_mean.value':
+                self.running_mean = value
+            elif key == 'running_var.value':
+                self.running_var = value
+            # Optionally handle 'num_batches_tracked' if you add this feature
+            # elif key == 'num_batches_tracked':
+            #     self.num_batches_tracked = value
+
+
 class Flatten(Module):
     def __init__(self):
         self.out_d = None
@@ -556,6 +644,51 @@ class Unflatten(Module):
         :return: Gradient reshaped back to the input shape of the forward pass.
         """
         return grad.reshape(grad.shape[0], -1, 1)
+
+
+class MaxPool2d(Module):
+    """
+    Example usage:
+    >>> pool = MaxPool2d(kernel_size=2, stride=2)
+    >>> input_tensor = np.random.rand(10, 3, 32, 32)  # Example input: 10 images, 3 channels, 32x32 pixels each
+    >>> output = pool(input_tensor)
+    >>> output.shape
+    (10, 3, 16, 16)
+    """
+    def __init__(self, kernel_size, stride=None):
+        if stride is None:
+            self.stride = kernel_size
+        else:
+            self.stride = stride
+        self.kernel_size = kernel_size
+
+    def forward(self, inp):
+        # inp shape: (N, C, H, W)
+        N, C, H, W = inp.shape
+
+        # Output dimensions
+        out_height = (H - self.kernel_size) // self.stride + 1
+        out_width = (W - self.kernel_size) // self.stride + 1
+
+        # Initialize the output tensor
+        out = np.zeros((N, C, out_height, out_width))
+
+        for n in range(N):
+            for c in range(C):
+                for i in range(out_height):
+                    for j in range(out_width):
+                        h_start = i * self.stride
+                        h_end = h_start + self.kernel_size
+                        w_start = j * self.stride
+                        w_end = w_start + self.kernel_size
+
+                        # Apply the max pooling operation
+                        out[n, c, i, j] = np.max(inp[n, c, h_start:h_end, w_start:w_end])
+
+        return out
+
+    def backward(self, grad):
+        raise NotImplementedError("Backward pass is not implemented.")
 
 
 class AdaptiveAvgPool2d(Module):
